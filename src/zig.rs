@@ -57,17 +57,26 @@ fn download(cache: &std::path::Path, arch: &str, os: &str) -> Result<(), String>
     .map_err(|e| format!("zig download failed: {e}"))?;
     std::fs::rename(&part, &tgz).map_err(|e| format!("finalize zig download: {e}"))?;
     // The tarball unpacks to zig-<arch>-<os>-<ver>/ containing the `zig` binary.
+    extract_tar_xz(&tgz, cache)
+}
+
+/// Extract a `.tar.xz` into `dest`. bsdtar (macOS/FreeBSD) and GNU tar (Linux)
+/// autodetect xz from `tar -xf`; some BSD tars (NetBSD/OpenBSD) don't, so fall
+/// back to decompressing with `xz` and piping into `tar`.
+fn extract_tar_xz(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    let archive = archive.to_string_lossy();
+    let dest = dest.to_string_lossy();
+    if crate::sh("tar", &["-xf", &archive, "-C", &dest], None).is_ok() {
+        return Ok(());
+    }
     crate::sh(
-        "tar",
+        "sh",
         &[
-            "-xf",
-            &tgz.to_string_lossy(),
-            "-C",
-            &cache.to_string_lossy(),
+            "-c",
+            &format!("xz -dc \"{archive}\" | tar -xf - -C \"{dest}\""),
         ],
         None,
-    )?;
-    Ok(())
+    )
 }
 
 fn host_tuple() -> Result<(String, String), String> {
@@ -76,9 +85,14 @@ fn host_tuple() -> Result<(String, String), String> {
         "x86_64" => "x86_64",
         other => return Err(format!("no Zig 0.16.0 mapping for host arch {other}")),
     };
+    // ziglang.org ships prebuilt 0.16.0 tarballs for each of these OSes using
+    // exactly these names (macOS, Linux, and the x86_64 BSDs).
     let os = match std::env::consts::OS {
         "macos" => "macos",
         "linux" => "linux",
+        "freebsd" => "freebsd",
+        "netbsd" => "netbsd",
+        "openbsd" => "openbsd",
         other => return Err(format!("no Zig 0.16.0 mapping for host os {other}")),
     };
     Ok((arch.into(), os.into()))

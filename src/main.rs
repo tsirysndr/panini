@@ -184,6 +184,8 @@ fn cmd_targets() {
         let is_host = host.map(|h| h.name == t.name).unwrap_or(false);
         let tag = if is_host {
             style::teal("  (host)")
+        } else if t.host_only {
+            style::warn("  (host-only)")
         } else {
             String::new()
         };
@@ -201,7 +203,13 @@ fn cmd_targets() {
         "\n{} panini build --target <name>[,<name>...]  (or --target all)",
         style::muted("use with:")
     );
-    println!("{}", style::muted("cross targets require --otp <version>."));
+    println!(
+        "{}",
+        style::muted(
+            "cross targets require --otp <version>; host-only (BSD) targets build \
+                      on that OS without --otp."
+        )
+    );
 }
 
 /// Run a `panini build` from its parsed arguments.
@@ -222,7 +230,9 @@ fn resolve_targets(spec: Option<&str>) -> Result<Vec<target::Target>, String> {
         None => Ok(vec![target::host().ok_or(
             "this host platform isn't a supported target; pass --target explicitly",
         )?]),
-        Some("all") => Ok(target::ALL.to_vec()),
+        // `all` builds every cross-compilable platform; BSD host-only targets are
+        // excluded (they can't be cross-built) and must be named explicitly.
+        Some("all") => Ok(target::cross_capable().collect()),
         Some(list) => {
             let mut out = Vec::new();
             for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {

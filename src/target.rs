@@ -6,48 +6,91 @@
 pub struct Target {
     /// panini's canonical name, e.g. "aarch64-macos".
     pub name: &'static str,
-    /// "macos" or "linux" (matches the BEAM Machine URL scheme).
+    /// "macos", "linux", or a BSD ("freebsd"/"netbsd"/"openbsd").
     pub os: &'static str,
     /// "x86_64" or "aarch64".
     pub arch: &'static str,
     /// Zig target triple for cross-compiling the launcher.
     pub zig: &'static str,
+    /// Buildable only natively on a host of the same OS: no precompiled OTP
+    /// runtime exists to cross-compile/bundle for it, so panini must use the
+    /// host's own Erlang. The BSDs are host-only for this reason.
+    pub host_only: bool,
 }
 
 /// Every target panini knows how to build. (Windows is not yet supported: it
 /// needs a .ps1 boot path and a different launcher exec model.)
+///
+/// macOS/Linux ship precompiled OTP runtimes, so they can be cross-built from
+/// any supported host. The BSDs are `host_only`: there are no precompiled BSD
+/// OTP builds to fetch, so they can only be built on a machine of that OS using
+/// its installed Erlang (and are excluded from `--target all`).
 pub const ALL: &[Target] = &[
     Target {
         name: "aarch64-macos",
         os: "macos",
         arch: "aarch64",
         zig: "aarch64-macos",
+        host_only: false,
     },
     Target {
         name: "x86_64-macos",
         os: "macos",
         arch: "x86_64",
         zig: "x86_64-macos",
+        host_only: false,
     },
     Target {
         name: "aarch64-linux",
         os: "linux",
         arch: "aarch64",
         zig: "aarch64-linux-musl",
+        host_only: false,
     },
     Target {
         name: "x86_64-linux",
         os: "linux",
         arch: "x86_64",
         zig: "x86_64-linux-musl",
+        host_only: false,
+    },
+    Target {
+        name: "x86_64-freebsd",
+        os: "freebsd",
+        arch: "x86_64",
+        zig: "x86_64-freebsd",
+        host_only: true,
+    },
+    Target {
+        name: "x86_64-netbsd",
+        os: "netbsd",
+        arch: "x86_64",
+        zig: "x86_64-netbsd",
+        host_only: true,
+    },
+    Target {
+        name: "x86_64-openbsd",
+        os: "openbsd",
+        arch: "x86_64",
+        zig: "x86_64-openbsd",
+        host_only: true,
     },
 ];
+
+/// The macOS/Linux subset that can be cross-built (i.e. what `--target all`
+/// expands to). BSD host-only targets are excluded.
+pub fn cross_capable() -> impl Iterator<Item = Target> {
+    ALL.iter().copied().filter(|t| !t.host_only)
+}
 
 /// The target matching the machine panini is running on, if supported.
 pub fn host() -> Option<Target> {
     let os = match std::env::consts::OS {
         "macos" => "macos",
         "linux" => "linux",
+        "freebsd" => "freebsd",
+        "netbsd" => "netbsd",
+        "openbsd" => "openbsd",
         _ => return None,
     };
     let arch = match std::env::consts::ARCH {

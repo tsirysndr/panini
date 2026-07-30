@@ -194,6 +194,33 @@ fn prepare(
     staging: &Path,
     host_major: Option<&str>,
 ) -> Result<Plan, String> {
+    // BSD targets are host-only: there's no precompiled OTP to fetch, so they
+    // can only bundle the host's own Erlang, and only when run on that OS.
+    if target.host_only {
+        if otp_version.is_some() {
+            return Err(format!(
+                "--otp is not supported for {os} targets: there are no precompiled OTP \
+                 builds for {os}. Build on a {os} host *without* --otp to bundle its \
+                 installed Erlang.",
+                os = target.os
+            ));
+        }
+        if !target.is_host() {
+            return Err(format!(
+                "'{}' can only be built on a {os} host — there is no precompiled OTP to \
+                 cross-compile the BEAM for {os}. Run panini on a {os} machine with Erlang \
+                 and Gleam installed.",
+                target.name,
+                os = target.os
+            ));
+        }
+        return Ok(Plan {
+            root: otp::root_dir()?,
+            toolbin: None,
+            musl: None,
+        });
+    }
+
     match otp_version {
         Some(v) => {
             let root = otp::precompiled_root(v, target, &cache_dir())?;

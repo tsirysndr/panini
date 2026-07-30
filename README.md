@@ -112,10 +112,24 @@ files live under `~/.cache/panini/apps/<hash>`.
 
 ```
 aarch64-macos     x86_64-macos     aarch64-linux     x86_64-linux
+x86_64-freebsd    x86_64-netbsd    x86_64-openbsd    (host-only)
 ```
 
 macOS runtimes are universal (one archive covers both arches); Linux is per-arch and
-statically linked (musl). Windows isn't supported yet (needs a different boot + launcher).
+statically linked (musl). These four ship precompiled OTP, so they can be **cross-built**
+from any host and are what `--target all` expands to.
+
+The BSD targets are **host-only**: there are no precompiled OTP builds to fetch for them, so
+they can't be cross-compiled or used with `--otp`. Build them *on* a FreeBSD/NetBSD/OpenBSD
+machine that has Erlang + Gleam installed — panini bundles that host's own OTP:
+
+```sh
+# on a FreeBSD box:
+panini build ./examples/hello -o ./hello        # host build → bundles the host's Erlang
+```
+
+FreeBSD has the most mature Zig + Erlang support; NetBSD/OpenBSD are best-effort. Windows
+isn't supported yet (needs a different boot + launcher).
 
 ## OTP version selection & the BEAM compatibility rule
 

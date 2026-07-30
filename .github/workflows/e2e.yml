@@ -158,3 +158,69 @@ jobs:
       - run: cargo clippy --release -- -D warnings
       - run: cargo fmt --check
       - run: ./target/release/panini targets
+
+  # ── BSD host-OTP e2e ────────────────────────────────────────────────────────
+  # The BSDs are host-only targets: no precompiled OTP exists to cross-compile,
+  # so we build *inside* a FreeBSD/NetBSD/OpenBSD VM using its packaged Erlang +
+  # Gleam. panini auto-downloads its pinned Zig 0.16.0 (prebuilt for each BSD).
+  # These VMs run under emulation and are slow; fail-fast is off so one flaky BSD
+  # doesn't mask the others. Versions may need bumping to match the images that
+  # cross-platform-actions currently ships.
+  bsd:
+    name: bsd · ${{ matrix.os }} ${{ matrix.version }} · x86_64 · host OTP
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: freebsd
+            version: "15.1"
+          - os: netbsd
+            version: "10.1"
+          - os: openbsd
+            version: "7.9"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start ${{ matrix.os }} ${{ matrix.version }} VM (x86_64)
+        uses: cross-platform-actions/action@v1.3.0
+        with:
+          operating_system: ${{ matrix.os }}
+          version: ${{ matrix.version }}
+          architecture: x86-64
+          shell: bash
+          memory: 8G
+          cpu_count: 4
+
+      - name: e2e in VM (install toolchain, build & run the sample)
+        shell: cpa.sh {0}
+        run: |
+          set -euo pipefail
+          export PATH="/usr/local/bin:/usr/pkg/bin:$HOME/.cargo/bin:$PATH"
+          # OpenBSD's default datasize ulimit is too low for rustc/large builds.
+          ulimit -d "$(ulimit -H -d)" 2>/dev/null || true
+
+          # 1. Toolchain from the OS package manager (no BSD prebuilts for these).
+          case "${{ matrix.os }}" in
+            freebsd) sudo env ASSUME_ALWAYS_YES=YES pkg install -y rust erlang gleam curl xz ;;
+            netbsd)  sudo pkgin -y update && sudo pkgin -y install rust erlang gleam curl xz ;;
+            openbsd) sudo pkg_add -I rust erlang gleam curl xz ;;
+          esac
+
+          cargo --version
+          gleam --version
+          erl -noshell -eval 'io:format("erl OTP ~s~n",[erlang:system_info(otp_release)]),halt().'
+
+          # 2. Build panini (its Zig 0.16.0 is auto-downloaded on first build).
+          #    Keep target/ out of the synced workspace.
+          export CARGO_TARGET_DIR="$HOME/build"
+          cargo build --release --locked
+          PANINI="$CARGO_TARGET_DIR/release/panini"
+          "$PANINI" doctor
+          "$PANINI" targets
+
+          # 3. Host-OTP build of the sample app (bundles the VM's own Erlang) + run.
+          "$PANINI" build examples/hello -o ./hello
+          out="$(./hello)"
+          echo "output: $out"
+          echo "$out" | grep -qx "Hello from hello!"
