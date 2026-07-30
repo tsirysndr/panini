@@ -109,9 +109,94 @@ jobs:
             dist/*.rpm*
           if-no-files-found: error
 
+  # BSD targets are host-only: build the panini CLI (pure Rust) inside a
+  # FreeBSD/NetBSD/OpenBSD x86_64 VM. These run under emulation and can be
+  # flaky, so they must never block the main release (see the release job's
+  # `if:` — it publishes as long as the macOS/Linux build succeeded).
+  build-bsd:
+    name: build · ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: freebsd, version: "15.1", name: x86_64-freebsd }
+          - { os: netbsd,  version: "10.1", name: x86_64-netbsd }
+          - { os: openbsd, version: "7.9",  name: x86_64-openbsd }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Start ${{ matrix.os }} ${{ matrix.version }} VM (x86_64)
+        uses: cross-platform-actions/action@v1.3.0
+        with:
+          operating_system: ${{ matrix.os }}
+          version: ${{ matrix.version }}
+          architecture: x86-64
+          shell: bash
+          memory: 8G
+          cpu_count: 4
+
+      - name: Build panini in VM
+        shell: cpa.sh {0}
+        run: |
+          set -euo pipefail
+          export PATH="/usr/local/bin:/usr/pkg/bin:$HOME/.cargo/bin:$PATH"
+          # OpenBSD's default datasize ulimit is too low for rustc.
+          ulimit -d "$(ulimit -H -d)" 2>/dev/null || true
+
+          # Only Rust is needed to build the CLI. BSD package managers can exit
+          # nonzero even on success, so tolerate it and verify cargo below.
+          set +e
+          case "${{ matrix.os }}" in
+            freebsd) sudo env ASSUME_ALWAYS_YES=YES pkg install -y rust ;;
+            netbsd)
+              echo "http://cdn.NetBSD.org/pub/pkgsrc/packages/NetBSD/amd64/${{ matrix.version }}/All" \
+                | sudo tee /usr/pkg/etc/pkgin/repositories.conf >/dev/null
+              sudo pkgin -y update && sudo pkgin -y install rust
+              ;;
+            openbsd) sudo pkg_add -I rust ;;
+          esac
+          set -e
+          command -v cargo >/dev/null || { echo "cargo not found after install"; exit 1; }
+          cargo --version
+
+          # Keep target/ out of the synced workspace; stage only the binary back.
+          export CARGO_TARGET_DIR="$HOME/build"
+          cargo build --release --locked
+          mkdir -p artifacts
+          cp "$CARGO_TARGET_DIR/release/panini" artifacts/panini
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          stage="panini-${{ steps.ver.outputs.tag }}-${{ matrix.name }}"
+          mkdir -p "$stage"
+          install -m 0755 artifacts/panini "$stage/panini"
+          cp README.md LICENSE "$stage/" 2>/dev/null || true
+          tar -czf "dist/${stage}.tar.gz" "$stage"
+          (cd dist && sha256sum "${stage}.tar.gz" > "${stage}.tar.gz.sha256")
+          ls -lh dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
   release:
     name: Publish release + Gemfury
-    needs: build
+    needs: [build, build-bsd]
+    # Publish as long as the macOS/Linux build succeeded; BSD is a best-effort
+    # add-on and must not block the release if its VMs fail.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
