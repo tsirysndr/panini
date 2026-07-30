@@ -11,6 +11,53 @@ use crate::{copy_tree, otp, sh, sh_env, zig};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Which compressor to use for the embedded payloads.
+///
+/// `Gz` is the default because gzip decompression is effectively universal — a
+/// gz payload keeps the "runs on a machine with nothing installed" promise. `Xz`
+/// and `Zst` produce smaller binaries but require that decompressor to be present
+/// at run time on Linux targets (macOS `tar` has both built in via libarchive).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Compression {
+    /// gzip — decompresses everywhere (default)
+    #[value(name = "gz", alias = "gzip")]
+    Gz,
+    /// xz — smallest binary, needs `xz` on Linux targets
+    #[value(name = "xz")]
+    Xz,
+    /// zstd — fast, needs `zstd` on Linux targets
+    #[value(name = "zst", alias = "zstd")]
+    Zst,
+}
+
+impl Compression {
+    /// Short name, used in messages and (informally) as the archive extension.
+    /// Matches the clap value name so it round-trips as a `--compression` value.
+    pub fn ext(self) -> &'static str {
+        match self {
+            Compression::Gz => "gz",
+            Compression::Xz => "xz",
+            Compression::Zst => "zst",
+        }
+    }
+
+    /// `tar` flags to *create* an archive with this compressor. Extraction never
+    /// needs these — the launcher uses `tar -xf`, which autodetects the format.
+    fn create_flags(self) -> &'static [&'static str] {
+        match self {
+            Compression::Gz => &["-czf"],
+            Compression::Xz => &["-cJf"],
+            Compression::Zst => &["--zstd", "-cf"],
+        }
+    }
+}
+
+impl std::fmt::Display for Compression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.ext())
+    }
+}
+
 struct Plan {
     /// OTP root to bundle for this target.
     root: PathBuf,
@@ -25,12 +72,17 @@ pub fn build(
     out: Option<PathBuf>,
     otp_version: Option<String>,
     targets: Vec<Target>,
+    compression: Compression,
 ) -> Result<(), String> {
     let app = read_app_name(project)?;
     let multi = targets.len() > 1;
     println!(
-        "\x1b[1m🥪 panini\x1b[0m  pressing '{app}' → {} target{}\n",
-        targets.len(),
+        "{} {}  {} {} → {} target{}\n",
+        crate::style::gradient("🥪 panini"),
+        crate::style::muted(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+        crate::style::muted("pressing"),
+        crate::style::cyan(&format!("'{app}'")),
+        crate::style::teal(&targets.len().to_string()),
         if multi { "s" } else { "" }
     );
 
@@ -53,7 +105,12 @@ pub fn build(
             (Some(v), None) => format!("bundling OTP {v}, compiled with host OTP"),
             (None, _) => "host OTP".into(),
         };
-        println!("\n\x1b[1m▸ {}\x1b[0m  {compiled_with}", target.name);
+        println!(
+            "\n{} {}  {}",
+            crate::style::teal("▸"),
+            crate::style::header(target.name),
+            crate::style::muted(&compiled_with)
+        );
 
         // The Linux OTP toolchain is musl-linked with a /tmp interpreter path;
         // install it before compiling with those binaries.
@@ -68,42 +125,65 @@ pub fn build(
             return Err(format!("expected shipment at {}", shipment.display()));
         }
 
-        // 2. Assemble a minimal, relocatable runtime + the compiled app.
+        // 2. Assemble a minimal, relocatable runtime + the compiled app, split
+        //    into two trees so they can be packed and cached independently.
         let payload = staging.join("payload");
         fs::create_dir_all(&payload).map_err(|e| format!("mkdir {}: {e}", payload.display()))?;
-        assemble_runtime(&plan.root, &shipment, &payload, plan.musl.as_ref())?;
+        let rt_desc = assemble_runtime(&plan.root, &shipment, &payload, plan.musl.as_ref())?;
         copy_tree(&shipment, &payload.join("app"))?;
         write_run_sh(&payload, &app, plan.musl.as_ref())?;
 
-        // 3. Compress + embed into a (cross-compiled) self-extracting launcher.
-        let tarball = staging.join("payload.tar.gz");
-        sh(
-            "tar",
-            &[
-                "-czf",
-                &tarball.to_string_lossy(),
-                "-C",
-                &staging.to_string_lossy(),
-                "payload",
-            ],
-            None,
-        )?;
-        let payload_bytes = fs::read(&tarball).map_err(|e| format!("read tarball: {e}"))?;
-        println!("     payload: {} MB", payload_bytes.len() / 1_048_576);
+        // 3. Pack each tree separately. The runtime is content-addressed so that
+        //    different apps sharing the same runtime extract it once, into a
+        //    shared cache dir on the target; the app is keyed by its own hash.
+        let ext = compression.ext();
+        let otp_pack = staging.join(format!("otp.{ext}"));
+        let app_pack = staging.join(format!("app.{ext}"));
+        make_archive(&payload, &["otp"], &otp_pack, compression)?;
+        make_archive(&payload, &["app", "run.sh"], &app_pack, compression)?;
+
+        let otp_bytes = fs::read(&otp_pack).map_err(|e| format!("read otp pack: {e}"))?;
+        let app_bytes = fs::read(&app_pack).map_err(|e| format!("read app pack: {e}"))?;
+        // Runtime tag: a stable digest of the runtime *composition* (target, OTP
+        // version, erts + lib apps, musl), independent of build timestamps — so
+        // identical runtimes hash identically and share one extraction.
+        let rt_key = format!(
+            "{}-{}-{}-{}",
+            target.os,
+            target.arch,
+            otp_version.as_deref().unwrap_or("host"),
+            rt_desc
+        );
+        let otp_tag = format!("{:08x}", djb2(rt_key.as_bytes()));
+        let app_tag = format!("{app}-{:08x}", djb2(&app_bytes));
+        println!(
+            "     {} otp {} + app {}  {}",
+            crate::style::muted("payload:"),
+            crate::style::cyan(&format!("{} MB", otp_bytes.len() / 1_048_576)),
+            crate::style::cyan(&format!("{} KB", app_bytes.len() / 1024)),
+            crate::style::muted(&format!("[{ext}, otp {otp_tag}]")),
+        );
 
         build_launcher(
             &zig_bin,
             &staging,
-            &tarball,
-            &app,
-            &payload_bytes,
+            &Payloads {
+                otp_pack: &otp_pack,
+                app_pack: &app_pack,
+                otp_tag: &otp_tag,
+                app_tag: &app_tag,
+            },
             target,
             &output,
         )?;
-        println!("     \x1b[32m✓\x1b[0m {}", output.display());
+        println!(
+            "     {} {}",
+            crate::style::ok("✓"),
+            crate::style::teal(&output.display().to_string())
+        );
     }
 
-    println!("\n\x1b[32m✓ done\x1b[0m");
+    println!("\n{}", crate::style::gradient("✓ done"));
     Ok(())
 }
 
@@ -220,7 +300,10 @@ fn compile_shipment(project: &Path, toolbin: Option<&Path>) -> Result<(), String
     if toolbin.is_some() {
         let _ = fs::remove_dir_all(project.join("build/dev/erlang"));
     }
-    println!("     gleam export erlang-shipment");
+    println!(
+        "     {}",
+        crate::style::muted("gleam export erlang-shipment")
+    );
     sh_env(
         "gleam",
         &["export", "erlang-shipment"],
@@ -232,38 +315,49 @@ fn compile_shipment(project: &Path, toolbin: Option<&Path>) -> Result<(), String
 /// Copy the erts dir, boot/releases metadata, and only the OTP lib apps the app
 /// actually references, into `<payload>/otp`. For Linux, also bundle the musl
 /// runtime so `run.sh` can install it at /tmp on the target.
+///
+/// Returns a descriptor of the runtime composition (erts + sorted lib apps +
+/// musl) that uniquely identifies its content, used to content-address the
+/// runtime cache so identical runtimes are extracted only once on the target.
 fn assemble_runtime(
     root: &Path,
     shipment: &Path,
     payload: &Path,
     musl: Option<&otp::Musl>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let otp_dst = payload.join("otp");
     let erts = otp::find_erts_dir(root)?;
-    let erts_dst = otp_dst.join(erts.file_name().unwrap());
+    let erts_name = erts.file_name().unwrap().to_string_lossy().into_owned();
+    let erts_dst = otp_dst.join(&erts_name);
     copy_tree(&erts, &erts_dst)?;
     make_bin_executable(&erts_dst.join("bin"))?;
     copy_tree(&root.join("releases"), &otp_dst.join("releases"))?;
 
     let lib_apps = otp::needed_lib_apps(shipment, root)?;
+    let mut app_names: Vec<String> = Vec::new();
     for app_dir in &lib_apps {
-        copy_tree(
-            app_dir,
-            &otp_dst.join("lib").join(app_dir.file_name().unwrap()),
-        )?;
+        let name = app_dir.file_name().unwrap().to_string_lossy().into_owned();
+        copy_tree(app_dir, &otp_dst.join("lib").join(&name))?;
+        app_names.push(name);
     }
+    app_names.sort();
     if let Some(m) = musl {
         fs::create_dir_all(&otp_dst).ok();
         fs::copy(&m.so, otp_dst.join("musl-runtime.so"))
             .map_err(|e| format!("bundle musl runtime: {e}"))?;
     }
     println!(
-        "     runtime: {} + {} OTP lib apps{}",
-        erts.file_name().unwrap().to_string_lossy(),
-        lib_apps.len(),
-        if musl.is_some() { " + musl" } else { "" }
+        "     {} {} {}",
+        crate::style::muted("runtime:"),
+        crate::style::cyan(&erts_name),
+        crate::style::muted(&format!(
+            "+ {} OTP lib apps{}",
+            lib_apps.len(),
+            if musl.is_some() { " + musl" } else { "" }
+        )),
     );
-    Ok(())
+    let musl_part = musl.map(|m| m.hash.as_str()).unwrap_or("");
+    Ok(format!("{erts_name}|{}|{musl_part}", app_names.join(",")))
 }
 
 /// Install the musl runtime at its hardcoded /tmp interpreter path (idempotent).
@@ -348,6 +442,10 @@ fn read_app_name(project: &Path) -> Result<String, String> {
 
 /// A self-locating boot script: sets the runtime env and boots via `erlexec`
 /// with an explicit boot file — no `Install` step, works for host + cross runtimes.
+///
+/// The OTP root is passed as `$1` by the launcher (it lives in a shared,
+/// content-addressed cache dir, separate from this app's own files) and consumed
+/// here; `$HERE` still locates this app's compiled `.beam` under `app/`.
 fn write_run_sh(payload: &Path, app: &str, musl: Option<&otp::Musl>) -> Result<(), String> {
     // Linux runtimes are musl-linked with a hardcoded /tmp interpreter path;
     // install the bundled libc there on first run before booting the VM.
@@ -363,7 +461,7 @@ fn write_run_sh(payload: &Path, app: &str, musl: Option<&otp::Musl>) -> Result<(
         "#!/bin/sh\n\
          set -eu\n\
          HERE=$(CDPATH= cd \"$(dirname \"$0\")\" && pwd)\n\
-         ROOT=\"$HERE/otp\"\n\
+         ROOT=\"$1\"; shift\n\
          {musl_step}\
          for d in \"$ROOT\"/erts-*/; do ERTS=\"${{d%/}}\"; done\n\
          for d in \"$ROOT\"/releases/*/; do REL=\"${{d%/}}\"; done\n\
@@ -389,13 +487,41 @@ fn write_run_sh(payload: &Path, app: &str, musl: Option<&otp::Musl>) -> Result<(
     Ok(())
 }
 
-/// Stage the Zig launcher sources, embed the payload, and (cross-)compile it.
+/// Create a compressed tar of `members` (relative to `cwd`) at `out`.
+fn make_archive(
+    cwd: &Path,
+    members: &[&str],
+    out: &Path,
+    compression: Compression,
+) -> Result<(), String> {
+    let mut args: Vec<String> = compression
+        .create_flags()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    args.push(out.to_string_lossy().into_owned());
+    args.push("-C".into());
+    args.push(cwd.to_string_lossy().into_owned());
+    for m in members {
+        args.push((*m).to_string());
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    sh("tar", &refs, None)
+}
+
+/// The compressed payloads and their cache tags to embed in the launcher.
+struct Payloads<'a> {
+    otp_pack: &'a Path,
+    app_pack: &'a Path,
+    otp_tag: &'a str,
+    app_tag: &'a str,
+}
+
+/// Stage the Zig launcher sources, embed both payloads, and (cross-)compile it.
 fn build_launcher(
     zig_bin: &Path,
     staging: &Path,
-    tarball: &Path,
-    app: &str,
-    payload_bytes: &[u8],
+    payloads: &Payloads,
     target: &Target,
     out: &Path,
 ) -> Result<(), String> {
@@ -412,11 +538,18 @@ fn build_launcher(
     fs::write(build_dir.join("build.zig"), BUILD_ZIG)
         .map_err(|e| format!("write build.zig: {e}"))?;
     fs::write(src.join("main.zig"), MAIN_ZIG).map_err(|e| format!("write main.zig: {e}"))?;
-    fs::copy(tarball, src.join("payload.tar.gz")).map_err(|e| format!("stage payload: {e}"))?;
-    let tag = format!("{app}-{:08x}", djb2(payload_bytes));
+    // The launcher extracts with `tar -xf` (format autodetected), so the packs
+    // are embedded under fixed names regardless of which compressor produced them.
+    fs::copy(payloads.otp_pack, src.join("otp.pack"))
+        .map_err(|e| format!("stage otp pack: {e}"))?;
+    fs::copy(payloads.app_pack, src.join("app.pack"))
+        .map_err(|e| format!("stage app pack: {e}"))?;
     fs::write(
         src.join("gen.zig"),
-        format!("pub const app_tag = \"{tag}\";\n"),
+        format!(
+            "pub const otp_tag = \"{}\";\npub const app_tag = \"{}\";\n",
+            payloads.otp_tag, payloads.app_tag
+        ),
     )
     .map_err(|e| format!("write gen.zig: {e}"))?;
 

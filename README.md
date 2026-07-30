@@ -95,8 +95,18 @@ cargo install --git https://github.com/tsirysndr/panini
 | `-o, --output PATH` | `<project>/<app>` | Output binary path |
 | `--otp VERSION` | host's OTP | Bundle a specific OTP, e.g. `27.2` (downloaded) |
 | `--target LIST` | host | Comma-separated targets, or `all` |
+| `--compression KIND` | `gz` | Payload compressor: `gz`, `xz`, or `zst` |
 
 With multiple targets the output name gets a `-<target>` suffix (e.g. `hello-x86_64-linux`).
+
+`gz` is the default because it decompresses with tooling present everywhere. `xz` and `zst`
+produce a smaller binary, but the matching decompressor must be available on the target at run
+time (Linux); macOS `tar` handles all three natively.
+
+The bundled runtime and the app are packed and cached separately. On first run the runtime is
+extracted **once** into a shared, content-addressed dir (`~/.cache/panini/rt/<hash>`), so several
+binaries built with the same runtime don't each re-unpack their own copy of OTP; each app's own
+files live under `~/.cache/panini/apps/<hash>`.
 
 ## Targets
 
