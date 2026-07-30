@@ -1,5 +1,7 @@
 # panini 🥪
 
+[![e2e](https://github.com/tsirysndr/panini/actions/workflows/e2e.yml/badge.svg)](https://github.com/tsirysndr/panini/actions/workflows/e2e.yml)
+
 **Press a Gleam (Erlang/BEAM) app into a single, self-contained binary.**
 
 A [Burrito](https://github.com/burrito-elixir/burrito) for Gleam. `panini` turns a
