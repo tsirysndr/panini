@@ -32,6 +32,16 @@
           pname = "panini";
           version = "0.1.0";
           strictDeps = true;
+        };
+
+        # panini has no crate dependencies, but keeping the split lets CI cache
+        # the (empty) dep build and mirrors the standard crane layout.
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        # Wrapping lives only on the final package: buildDepsOnly never produces
+        # bin/panini, so a postInstall wrap in commonArgs would fail there.
+        panini = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
 
           # panini shells out to these at runtime; provide them as a fallback
           # (--suffix keeps any versions already on the user's PATH first).
@@ -47,13 +57,7 @@
             license = licenses.mit;
             mainProgram = "panini";
           };
-        };
-
-        # panini has no crate dependencies, but keeping the split lets CI cache
-        # the (empty) dep build and mirrors the standard crane layout.
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-
-        panini = craneLib.buildPackage (commonArgs // { inherit cargoArtifacts; });
+        });
       in
       {
         checks = {
