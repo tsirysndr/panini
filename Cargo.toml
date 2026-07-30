@@ -2,8 +2,19 @@
 name = "panini"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.74"
 description = "Press a Gleam (Erlang/BEAM) app into a single self-contained binary — a Burrito for Gleam."
+authors = ["Tsiry Sandratraina <tsiry.sndr@rocksky.app>"]
 license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/tsirysndr/panini"
+repository = "https://github.com/tsirysndr/panini"
+documentation = "https://github.com/tsirysndr/panini"
+keywords = ["gleam", "erlang", "beam", "binary", "packaging"]
+categories = ["command-line-utilities", "development-tools::build-utils"]
+# Keep the published crate focused on the tool (the Zig launcher under
+# launcher/ is embedded via include_str! and must stay in the package).
+exclude = ["/examples", "/dist", "/.github", "/flake.nix", "/flake.lock"]
 # The gleam sample under examples/ is not a cargo example target.
 autoexamples = false
 
