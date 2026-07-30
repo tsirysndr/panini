@@ -35,12 +35,12 @@
         commonArgs = {
           inherit src;
           pname = "panini";
-          version = "0.1.0";
+          version = "0.2.0";
           strictDeps = true;
         };
 
-        # panini has no crate dependencies, but keeping the split lets CI cache
-        # the (empty) dep build and mirrors the standard crane layout.
+        # Build dependencies (clap + its transitive crates) separately so CI can
+        # cache them, following the standard crane layout.
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
         # Wrapping lives only on the final package: buildDepsOnly never produces

@@ -24,6 +24,24 @@ panini build ./examples/hello --otp 27.2                       # pick the OTP ve
 panini build ./examples/hello --target all --otp 27.2          # every platform at once
 ```
 
+## Contents
+
+- [Install](#install)
+- [Commands](#commands)
+  - [`build` options](#build-options)
+- [Targets](#targets)
+- [OTP version selection & the BEAM compatibility rule](#otp-version-selection--the-beam-compatibility-rule)
+- [How it works](#how-it-works)
+- [Zig is handled for you](#zig-is-handled-for-you)
+- [Requirements](#requirements)
+- [Usage](#usage)
+- [CI](#ci)
+- [Development](#development)
+- [Roadmap](#roadmap)
+- [Layout](#layout)
+- [Name](#name)
+- [License](#license)
+
 ---
 
 ## Install
@@ -32,9 +50,9 @@ panini build ./examples/hello --target all --otp 27.2          # every platform 
 
 ```sh
 # example: Linux x86_64
-curl -fsSLO https://github.com/tsirysndr/panini/releases/latest/download/panini-v0.1.0-x86_64-linux.tar.gz
-tar -xzf panini-v0.1.0-x86_64-linux.tar.gz
-sudo install panini-v0.1.0-x86_64-linux/panini /usr/local/bin/panini
+curl -fsSLO https://github.com/tsirysndr/panini/releases/latest/download/panini-v0.2.0-x86_64-linux.tar.gz
+tar -xzf panini-v0.2.0-x86_64-linux.tar.gz
+sudo install panini-v0.2.0-x86_64-linux/panini /usr/local/bin/panini
 ```
 
 **Homebrew** (macOS / Linux):
