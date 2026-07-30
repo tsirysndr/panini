@@ -41,13 +41,24 @@ impl Compression {
         }
     }
 
-    /// `tar` flags to *create* an archive with this compressor. Extraction never
-    /// needs these — the launcher uses `tar -xf`, which autodetects the format.
+    /// `tar` flags to *create* an archive with this compressor. Extraction on
+    /// the target tries `tar -xf` first (autodetecting tars), then falls back to
+    /// [`decompressor`] piped into tar for tars that don't (OpenBSD/NetBSD base).
     fn create_flags(self) -> &'static [&'static str] {
         match self {
             Compression::Gz => &["-czf"],
             Compression::Xz => &["-cJf"],
             Compression::Zst => &["--zstd", "-cf"],
+        }
+    }
+
+    /// Shell filter that decompresses this format to stdout, used by the launcher
+    /// as a fallback when `tar` won't decompress the payload itself.
+    fn decompressor(self) -> &'static str {
+        match self {
+            Compression::Gz => "gzip -dc",
+            Compression::Xz => "xz -dc",
+            Compression::Zst => "zstd -dc",
         }
     }
 }
@@ -172,6 +183,7 @@ pub fn build(
                 app_pack: &app_pack,
                 otp_tag: &otp_tag,
                 app_tag: &app_tag,
+                unpack: compression.decompressor(),
             },
             target,
             &output,
@@ -542,6 +554,8 @@ struct Payloads<'a> {
     app_pack: &'a Path,
     otp_tag: &'a str,
     app_tag: &'a str,
+    /// Shell filter that decompresses the packs (launcher extraction fallback).
+    unpack: &'a str,
 }
 
 /// Stage the Zig launcher sources, embed both payloads, and (cross-)compile it.
@@ -574,8 +588,8 @@ fn build_launcher(
     fs::write(
         src.join("gen.zig"),
         format!(
-            "pub const otp_tag = \"{}\";\npub const app_tag = \"{}\";\n",
-            payloads.otp_tag, payloads.app_tag
+            "pub const otp_tag = \"{}\";\npub const app_tag = \"{}\";\npub const unpack = \"{}\";\n",
+            payloads.otp_tag, payloads.app_tag, payloads.unpack
         ),
     )
     .map_err(|e| format!("write gen.zig: {e}"))?;

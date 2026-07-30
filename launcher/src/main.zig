@@ -72,13 +72,25 @@ fn ensureExtracted(
     if (already) return true;
 
     // Delegate dir creation + extraction to the system mkdir/tar, present on
-    // every macOS/Linux target and independent of libc details. `tar -xf`
-    // autodetects the compression format (gz/xz/zst).
+    // every macOS/Linux/BSD target and independent of libc details.
     const pack = try std.fmt.allocPrint(arena, "{s}/pack", .{dir});
     _ = try std.process.run(gpa, io, .{ .argv = &.{ "mkdir", "-p", dir } });
     try cwd.writeFile(io, .{ .sub_path = pack, .data = data });
-    const res = try std.process.run(gpa, io, .{ .argv = &.{ "tar", "-xf", pack, "-C", dir } });
-    if (res.term != .exited or res.term.exited != 0) return false;
+
+    // First try `tar -xf`, which autodetects the compression (macOS/Linux/
+    // FreeBSD). Some BSD tars (OpenBSD/NetBSD base) refuse to decompress, so
+    // fall back to decompressing explicitly and piping an uncompressed stream in.
+    const direct = std.process.run(gpa, io, .{ .argv = &.{ "tar", "-xf", pack, "-C", dir } });
+    const ok = if (direct) |r| r.term == .exited and r.term.exited == 0 else |_| false;
+    if (!ok) {
+        const cmd = try std.fmt.allocPrint(
+            arena,
+            "{s} < \"{s}\" | tar -xf - -C \"{s}\"",
+            .{ gen.unpack, pack, dir },
+        );
+        const res = std.process.run(gpa, io, .{ .argv = &.{ "sh", "-c", cmd } }) catch return false;
+        if (res.term != .exited or res.term.exited != 0) return false;
+    }
 
     // The compressed pack is only needed for this one extraction; drop it so the
     // cache holds just the unpacked tree (best-effort — a leftover is harmless).
