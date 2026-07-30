@@ -240,7 +240,9 @@ fn assemble_runtime(
 ) -> Result<(), String> {
     let otp_dst = payload.join("otp");
     let erts = otp::find_erts_dir(root)?;
-    copy_tree(&erts, &otp_dst.join(erts.file_name().unwrap()))?;
+    let erts_dst = otp_dst.join(erts.file_name().unwrap());
+    copy_tree(&erts, &erts_dst)?;
+    make_bin_executable(&erts_dst.join("bin"))?;
     copy_tree(&root.join("releases"), &otp_dst.join("releases"))?;
 
     let lib_apps = otp::needed_lib_apps(shipment, root)?;
@@ -267,10 +269,34 @@ fn assemble_runtime(
 /// Install the musl runtime at its hardcoded /tmp interpreter path (idempotent).
 fn install_musl_tmp(m: &otp::Musl) -> Result<(), String> {
     let dst = PathBuf::from(m.tmp_path());
-    if dst.exists() {
-        return Ok(());
+    if !dst.exists() {
+        fs::copy(&m.so, &dst).map_err(|e| format!("install musl to {}: {e}", dst.display()))?;
     }
-    fs::copy(&m.so, &dst).map_err(|e| format!("install musl to {}: {e}", dst.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The kernel requires the ELF interpreter to be executable.
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o755)).ok();
+    }
+    Ok(())
+}
+
+/// Make every file directly inside a `bin` dir executable (0755). Harmless for
+/// data files, and belt-and-suspenders against any perm loss in copy/extract.
+fn make_bin_executable(bin: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(entries) = fs::read_dir(bin) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_file() {
+                    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).ok();
+                }
+            }
+        }
+    }
+    let _ = bin;
     Ok(())
 }
 
@@ -328,7 +354,7 @@ fn write_run_sh(payload: &Path, app: &str, musl: Option<&otp::Musl>) -> Result<(
     let musl_step = match musl {
         Some(m) => format!(
             "MUSL=\"{}\"\n\
-             [ -f \"$MUSL\" ] || cp \"$ROOT/musl-runtime.so\" \"$MUSL\"\n",
+             [ -f \"$MUSL\" ] || {{ cp \"$ROOT/musl-runtime.so\" \"$MUSL\"; chmod +x \"$MUSL\"; }}\n",
             m.tmp_path()
         ),
         None => String::new(),

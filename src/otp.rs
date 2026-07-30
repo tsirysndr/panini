@@ -153,6 +153,13 @@ pub fn fetch_musl(root: &Path, cache: &Path) -> Result<Musl, String> {
         )?;
         fs::rename(&part, &so).map_err(|e| format!("finalize musl download: {e}"))?;
     }
+    // The kernel requires the ELF interpreter itself to be executable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&so, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod musl: {e}"))?;
+    }
     Ok(Musl { so, hash })
 }
 
