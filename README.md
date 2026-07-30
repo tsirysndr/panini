@@ -35,6 +35,12 @@ tar -xzf panini-v0.1.0-x86_64-linux.tar.gz
 sudo install panini-v0.1.0-x86_64-linux/panini /usr/local/bin/panini
 ```
 
+**Homebrew** (macOS / Linux):
+
+```sh
+brew install tsirysndr/tap/panini
+```
+
 **Debian / Ubuntu** (`.deb` for `amd64`, `arm64`) — from the Gemfury apt repo:
 
 ```sh
