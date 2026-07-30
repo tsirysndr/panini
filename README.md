@@ -90,6 +90,13 @@ nix run github:tsirysndr/panini -- --help     # run without installing
 nix profile install github:tsirysndr/panini   # or install
 ```
 
+Enable the [Cachix](https://cachix.org) binary cache first to pull prebuilt binaries
+instead of compiling locally — a much faster install:
+
+```sh
+cachix use panini
+```
+
 **From source** (Rust):
 
 ```sh
