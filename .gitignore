@@ -7,3 +7,14 @@
 # gleam build output in the example
 /examples/*/build
 /examples/hello/hello
+# built release/package artifacts (dist/ keeps only the deb/rpm templates)
+/dist/*.tar.gz
+/dist/*.deb
+/dist/*.rpm
+/dist/*.sha256
+/dist/debian/*/usr
+/dist/rpm/*/usr
+/rpmbuild
+/panini-*-*/
+# nix
+/result

@@ -1,0 +1,11 @@
+Package: panini
+Version: 0.1.0
+Section: devel
+Priority: optional
+Architecture: amd64
+Maintainer: Tsiry Sandratraina <tsiry.sndr@rocksky.app>
+Homepage: https://github.com/tsirysndr/panini
+Description: Press a Gleam (Erlang/BEAM) app into a single self-contained binary
+ panini bundles the BEAM runtime with your compiled Gleam app so it runs on a
+ machine with nothing installed. Supports OTP version selection and
+ cross-compilation. Statically linked (musl); no runtime dependencies.

@@ -24,6 +24,52 @@ panini build ./examples/hello --target all --otp 27.2          # every platform 
 
 ---
 
+## Install
+
+**Prebuilt binary** (macOS / Linux, x86_64 / aarch64) — from the [releases](https://github.com/tsirysndr/panini/releases):
+
+```sh
+# example: Linux x86_64
+curl -fsSLO https://github.com/tsirysndr/panini/releases/latest/download/panini-v0.1.0-x86_64-linux.tar.gz
+tar -xzf panini-v0.1.0-x86_64-linux.tar.gz
+sudo install panini-v0.1.0-x86_64-linux/panini /usr/local/bin/panini
+```
+
+**Debian / Ubuntu** (`.deb` for `amd64`, `arm64`) — from the Gemfury apt repo:
+
+```sh
+echo "deb [trusted=yes] https://apt.fury.io/tsiry/ /" \
+  | sudo tee /etc/apt/sources.list.d/panini.list
+sudo apt-get update
+sudo apt-get install panini
+```
+
+**Fedora / RHEL** (`.rpm` for `x86_64`, `aarch64`) — from the Gemfury yum repo:
+
+```sh
+sudo tee /etc/yum.repos.d/panini.repo <<'EOF'
+[panini]
+name=panini
+baseurl=https://yum.fury.io/tsiry/
+enabled=1
+gpgcheck=0
+EOF
+sudo dnf install panini
+```
+
+**Nix** (flake):
+
+```sh
+nix run github:tsirysndr/panini -- --help     # run without installing
+nix profile install github:tsirysndr/panini   # or install
+```
+
+**From source** (Rust):
+
+```sh
+cargo install --git https://github.com/tsirysndr/panini
+```
+
 ## Commands
 
 | Command | What it does |
@@ -135,6 +181,17 @@ cargo build --release
   and runs it on a real arm64 runner, proving cross-compiled binaries work end-to-end.
 - **cli** — `clippy -D warnings`, `fmt --check`, and the CLI subcommands.
 
+`nix.yml` builds the flake on Linux + macOS (`nix build` + `nix flake check`). `release.yml`
+builds binaries + `.deb`/`.rpm` for macOS/Linux × amd64/arm64 on tag push, publishes them to
+GitHub Releases, and pushes the packages to Gemfury.
+
+## Development
+
+```sh
+nix develop        # Rust toolchain + gleam + erlang + fetch/extract tools
+cargo build --release
+```
+
 ## Roadmap
 
 - [x] Single self-contained binary from a Gleam app (host)
@@ -152,9 +209,11 @@ cargo build --release
 
 ```
 src/            Rust CLI: main, pipeline, otp, target, zig
-launcher/       Zig 0.16 self-extracting wrapper (build.zig, src/main.zig)
+launcher/       Zig 0.16 self-extracting wrapper (embedded into panini via include_str!)
 examples/hello/ a sample Gleam app to build
-.github/        e2e workflow
+dist/           .deb / .rpm packaging templates
+flake.nix       Nix package + dev shell
+.github/        e2e, nix, and release workflows
 ```
 
 ## Name

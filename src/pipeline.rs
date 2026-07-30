@@ -399,24 +399,19 @@ fn build_launcher(
     target: &Target,
     out: &Path,
 ) -> Result<(), String> {
-    let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("launcher");
-    if !template.join("build.zig").exists() {
-        return Err(format!(
-            "launcher template not found at {} (run panini from its repo for v0)",
-            template.display()
-        ));
-    }
+    // Launcher sources are embedded at compile time, so a distributed panini
+    // binary is self-contained and doesn't depend on the repo layout.
+    const BUILD_ZIG: &str = include_str!("../launcher/build.zig");
+    const MAIN_ZIG: &str = include_str!("../launcher/src/main.zig");
 
     let build_dir = staging.join("launcher");
     let _ = fs::remove_dir_all(&build_dir);
     let src = build_dir.join("src");
     fs::create_dir_all(&src).map_err(|e| format!("mkdir {}: {e}", src.display()))?;
 
-    // Copy only the launcher sources — never the template's .zig-cache/zig-out.
-    fs::copy(template.join("build.zig"), build_dir.join("build.zig"))
-        .map_err(|e| format!("copy build.zig: {e}"))?;
-    fs::copy(template.join("src/main.zig"), src.join("main.zig"))
-        .map_err(|e| format!("copy main.zig: {e}"))?;
+    fs::write(build_dir.join("build.zig"), BUILD_ZIG)
+        .map_err(|e| format!("write build.zig: {e}"))?;
+    fs::write(src.join("main.zig"), MAIN_ZIG).map_err(|e| format!("write main.zig: {e}"))?;
     fs::copy(tarball, src.join("payload.tar.gz")).map_err(|e| format!("stage payload: {e}"))?;
     let tag = format!("{app}-{:08x}", djb2(payload_bytes));
     fs::write(
