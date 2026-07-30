@@ -1,6 +1,8 @@
 # panini 🥪
 
 [![e2e](https://github.com/tsirysndr/panini/actions/workflows/e2e.yml/badge.svg)](https://github.com/tsirysndr/panini/actions/workflows/e2e.yml)
+[![nix](https://github.com/tsirysndr/panini/actions/workflows/nix.yml/badge.svg)](https://github.com/tsirysndr/panini/actions/workflows/nix.yml)
+[![FlakeHub](https://img.shields.io/endpoint?url=https://flakehub.com/f/tsirysndr/panini/badge)](https://flakehub.com/flake/tsirysndr/panini)
 
 **Press a Gleam (Erlang/BEAM) app into a single, self-contained binary.**
 
