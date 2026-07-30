@@ -1,0 +1,9 @@
+/target
+# generated per-build launcher inputs (real ones are injected by `panini build`)
+/launcher/.zig-cache
+/launcher/zig-out
+/launcher/src/payload.tar.gz
+/launcher/src/gen.zig
+# gleam build output in the example
+/examples/*/build
+/examples/hello/hello

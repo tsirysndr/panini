@@ -1,0 +1,15 @@
+[package]
+name = "panini"
+version = "0.1.0"
+edition = "2021"
+description = "Press a Gleam (Erlang/BEAM) app into a single self-contained binary — a Burrito for Gleam."
+license = "MIT"
+# The gleam sample under examples/ is not a cargo example target.
+autoexamples = false
+
+[[bin]]
+name = "panini"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
