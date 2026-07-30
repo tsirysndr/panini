@@ -108,6 +108,54 @@ pub fn precompiled_root(version: &str, target: &Target, cache: &Path) -> Result<
     ))
 }
 
+/// The musl libc that BEAM Machine Linux builds are linked against. Their ELF
+/// interpreter is a hardcoded `/tmp/libc-musl-<hash>.so`, so the `.so` must be
+/// placed there before any OTP binary (or the produced app) runs.
+pub struct Musl {
+    /// Cached `.so` file to install at `/tmp/libc-musl-<hash>.so`.
+    pub so: PathBuf,
+    /// Content hash naming the interpreter file.
+    pub hash: String,
+}
+
+impl Musl {
+    /// The absolute path the OTP binaries expect their interpreter at.
+    pub fn tmp_path(&self) -> String {
+        format!("/tmp/libc-musl-{}.so", self.hash)
+    }
+}
+
+/// For a Linux OTP root, fetch the matching musl libc runtime (hash read from the
+/// build's `burrito_runtime_manifest.txt`), cached under `<cache>/musl`.
+pub fn fetch_musl(root: &Path, cache: &Path) -> Result<Musl, String> {
+    let manifest = fs::read_to_string(root.join("burrito_runtime_manifest.txt"))
+        .map_err(|e| format!("read runtime manifest: {e}"))?;
+    let hash = manifest
+        .lines()
+        .find_map(|l| l.strip_prefix("MUSL_HASH="))
+        .map(|s| s.trim().to_string())
+        .ok_or("no MUSL_HASH in runtime manifest")?;
+
+    let dir = cache.join("musl");
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let so = dir.join(format!("libc-musl-{hash}.so"));
+    if !so.exists() {
+        let url = format!(
+            "https://beam-machine-universal.b-cdn.net/musl/libc-musl-{hash}.so\
+             ?please-respect-my-bandwidth-costs=thank-you"
+        );
+        println!("     fetching musl runtime for Linux (cached after first use)…");
+        let part = so.with_extension("part");
+        crate::sh(
+            "curl",
+            &["-fsSL", "--retry", "2", "-o", &part.to_string_lossy(), &url],
+            None,
+        )?;
+        fs::rename(&part, &so).map_err(|e| format!("finalize musl download: {e}"))?;
+    }
+    Ok(Musl { so, hash })
+}
+
 /// ERTS version string (e.g. "17.0.3"); the runtime dir is `erts-<version>`.
 pub fn erts_version() -> Result<String, String> {
     capture(

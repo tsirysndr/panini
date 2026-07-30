@@ -16,6 +16,8 @@ struct Plan {
     root: PathBuf,
     /// If set, compile the shipment with this toolchain dir on PATH.
     toolbin: Option<PathBuf>,
+    /// For Linux targets: the musl runtime that must live at /tmp/libc-musl-*.so.
+    musl: Option<otp::Musl>,
 }
 
 pub fn build(
@@ -53,6 +55,12 @@ pub fn build(
         };
         println!("\n\x1b[1m▸ {}\x1b[0m  {compiled_with}", target.name);
 
+        // The Linux OTP toolchain is musl-linked with a /tmp interpreter path;
+        // install it before compiling with those binaries.
+        if let (Some(_), Some(m)) = (&plan.toolbin, &plan.musl) {
+            install_musl_tmp(m)?;
+        }
+
         // 1. Gleam shipment, using the selected toolchain.
         compile_shipment(project, plan.toolbin.as_deref())?;
         let shipment = project.join("build/erlang-shipment");
@@ -63,9 +71,9 @@ pub fn build(
         // 2. Assemble a minimal, relocatable runtime + the compiled app.
         let payload = staging.join("payload");
         fs::create_dir_all(&payload).map_err(|e| format!("mkdir {}: {e}", payload.display()))?;
-        assemble_runtime(&plan.root, &shipment, &payload)?;
+        assemble_runtime(&plan.root, &shipment, &payload, plan.musl.as_ref())?;
         copy_tree(&shipment, &payload.join("app"))?;
-        write_run_sh(&payload, &app)?;
+        write_run_sh(&payload, &app, plan.musl.as_ref())?;
 
         // 3. Compress + embed into a (cross-compiled) self-extracting launcher.
         let tarball = staging.join("payload.tar.gz");
@@ -109,12 +117,19 @@ fn prepare(
     match otp_version {
         Some(v) => {
             let root = otp::precompiled_root(v, target, &cache_dir())?;
+            // BEAM Machine Linux builds are musl-linked and need their /tmp runtime.
+            let musl = if target.os == "linux" {
+                Some(otp::fetch_musl(&root, &cache_dir())?)
+            } else {
+                None
+            };
             if runnable_on_host(target) {
                 // We can execute this OTP: compile the app with it (correct beam).
                 let toolbin = make_toolbin(&root, staging)?;
                 Ok(Plan {
                     root,
                     toolbin: Some(toolbin),
+                    musl,
                 })
             } else {
                 // Cross-OS: app is compiled by the host toolchain; majors must match.
@@ -131,12 +146,14 @@ fn prepare(
                 Ok(Plan {
                     root,
                     toolbin: None,
+                    musl,
                 })
             }
         }
         None if target.is_host() => Ok(Plan {
             root: otp::root_dir()?,
             toolbin: None,
+            musl: None,
         }),
         None => Err(format!(
             "cross-building for '{}' needs an explicit OTP version — pass e.g. `--otp {}` \
@@ -213,8 +230,14 @@ fn compile_shipment(project: &Path, toolbin: Option<&Path>) -> Result<(), String
 }
 
 /// Copy the erts dir, boot/releases metadata, and only the OTP lib apps the app
-/// actually references, into `<payload>/otp`.
-fn assemble_runtime(root: &Path, shipment: &Path, payload: &Path) -> Result<(), String> {
+/// actually references, into `<payload>/otp`. For Linux, also bundle the musl
+/// runtime so `run.sh` can install it at /tmp on the target.
+fn assemble_runtime(
+    root: &Path,
+    shipment: &Path,
+    payload: &Path,
+    musl: Option<&otp::Musl>,
+) -> Result<(), String> {
     let otp_dst = payload.join("otp");
     let erts = otp::find_erts_dir(root)?;
     copy_tree(&erts, &otp_dst.join(erts.file_name().unwrap()))?;
@@ -227,11 +250,27 @@ fn assemble_runtime(root: &Path, shipment: &Path, payload: &Path) -> Result<(), 
             &otp_dst.join("lib").join(app_dir.file_name().unwrap()),
         )?;
     }
+    if let Some(m) = musl {
+        fs::create_dir_all(&otp_dst).ok();
+        fs::copy(&m.so, otp_dst.join("musl-runtime.so"))
+            .map_err(|e| format!("bundle musl runtime: {e}"))?;
+    }
     println!(
-        "     runtime: {} + {} OTP lib apps",
+        "     runtime: {} + {} OTP lib apps{}",
         erts.file_name().unwrap().to_string_lossy(),
-        lib_apps.len()
+        lib_apps.len(),
+        if musl.is_some() { " + musl" } else { "" }
     );
+    Ok(())
+}
+
+/// Install the musl runtime at its hardcoded /tmp interpreter path (idempotent).
+fn install_musl_tmp(m: &otp::Musl) -> Result<(), String> {
+    let dst = PathBuf::from(m.tmp_path());
+    if dst.exists() {
+        return Ok(());
+    }
+    fs::copy(&m.so, &dst).map_err(|e| format!("install musl to {}: {e}", dst.display()))?;
     Ok(())
 }
 
@@ -283,12 +322,23 @@ fn read_app_name(project: &Path) -> Result<String, String> {
 
 /// A self-locating boot script: sets the runtime env and boots via `erlexec`
 /// with an explicit boot file — no `Install` step, works for host + cross runtimes.
-fn write_run_sh(payload: &Path, app: &str) -> Result<(), String> {
+fn write_run_sh(payload: &Path, app: &str, musl: Option<&otp::Musl>) -> Result<(), String> {
+    // Linux runtimes are musl-linked with a hardcoded /tmp interpreter path;
+    // install the bundled libc there on first run before booting the VM.
+    let musl_step = match musl {
+        Some(m) => format!(
+            "MUSL=\"{}\"\n\
+             [ -f \"$MUSL\" ] || cp \"$ROOT/musl-runtime.so\" \"$MUSL\"\n",
+            m.tmp_path()
+        ),
+        None => String::new(),
+    };
     let script = format!(
         "#!/bin/sh\n\
          set -eu\n\
          HERE=$(CDPATH= cd \"$(dirname \"$0\")\" && pwd)\n\
          ROOT=\"$HERE/otp\"\n\
+         {musl_step}\
          for d in \"$ROOT\"/erts-*/; do ERTS=\"${{d%/}}\"; done\n\
          for d in \"$ROOT\"/releases/*/; do REL=\"${{d%/}}\"; done\n\
          export ROOTDIR=\"$ROOT\"\n\
