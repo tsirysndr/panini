@@ -201,11 +201,28 @@ jobs:
           ulimit -d "$(ulimit -H -d)" 2>/dev/null || true
 
           # 1. Toolchain from the OS package manager (no BSD prebuilts for these).
+          #    FreeBSD ships xz + an xz-aware bsdtar in base, so it isn't a pkg;
+          #    NetBSD/OpenBSD need the xz pkg for the zig-tarball extraction path.
           case "${{ matrix.os }}" in
-            freebsd) sudo env ASSUME_ALWAYS_YES=YES pkg install -y rust erlang gleam curl xz ;;
-            netbsd)  sudo pkgin -y update && sudo pkgin -y install rust erlang gleam curl xz ;;
+            freebsd) sudo env ASSUME_ALWAYS_YES=YES pkg install -y rust erlang gleam curl ;;
+            netbsd)
+              # Default mirror is ftp.NetBSD.org (slow). Point pkgin at the
+              # Fastly CDN instead; it rewrites amd64→x86_64 and the release to
+              # the current quarterly. http avoids TLS-cert setup in the VM.
+              echo "http://cdn.NetBSD.org/pub/pkgsrc/packages/NetBSD/amd64/${{ matrix.version }}/All" \
+                | sudo tee /usr/pkg/etc/pkgin/repositories.conf >/dev/null
+              sudo pkgin -y update
+              sudo pkgin -y install rust erlang gleam curl xz
+              ;;
             openbsd) sudo pkg_add -I rust erlang gleam curl xz ;;
           esac
+
+          # Some BSDs install Erlang under a versioned libdir that isn't on PATH
+          # (e.g. OpenBSD's /usr/local/lib/erlangNN/bin); add it so erl/erlc resolve.
+          for d in /usr/local/lib/erlang*/bin /usr/pkg/lib/erlang/bin; do
+            [ -d "$d" ] && PATH="$d:$PATH"
+          done
+          export PATH
 
           cargo --version
           gleam --version
