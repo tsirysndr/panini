@@ -54,7 +54,7 @@ jobs:
           stage="panini-${{ steps.ver.outputs.tag }}-${{ matrix.name }}"
           mkdir -p "$stage"
           cp "target/${{ matrix.target }}/release/panini" "$stage/"
-          cp README.md "$stage/" 2>/dev/null || true
+          cp README.md LICENSE "$stage/" 2>/dev/null || true
           tar -czf "dist/${stage}.tar.gz" "$stage"
 
       # Debian package, from the committed template in dist/debian/<arch>.
