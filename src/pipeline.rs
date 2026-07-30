@@ -17,27 +17,22 @@ use std::path::{Path, PathBuf};
 /// gz payload keeps the "runs on a machine with nothing installed" promise. `Xz`
 /// and `Zst` produce smaller binaries but require that decompressor to be present
 /// at run time on Linux targets (macOS `tar` has both built in via libarchive).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Compression {
+    /// gzip — decompresses everywhere (default)
+    #[value(name = "gz", alias = "gzip")]
     Gz,
+    /// xz — smallest binary, needs `xz` on Linux targets
+    #[value(name = "xz")]
     Xz,
+    /// zstd — fast, needs `zstd` on Linux targets
+    #[value(name = "zst", alias = "zstd")]
     Zst,
 }
 
 impl Compression {
-    /// Parse a `--compression` value (accepts common aliases).
-    pub fn parse(s: &str) -> Result<Self, String> {
-        match s.to_ascii_lowercase().as_str() {
-            "gz" | "gzip" | "tgz" => Ok(Compression::Gz),
-            "xz" => Ok(Compression::Xz),
-            "zst" | "zstd" => Ok(Compression::Zst),
-            other => Err(format!(
-                "unknown compression '{other}' (expected: gz, xz, or zst)"
-            )),
-        }
-    }
-
     /// Short name, used in messages and (informally) as the archive extension.
+    /// Matches the clap value name so it round-trips as a `--compression` value.
     pub fn ext(self) -> &'static str {
         match self {
             Compression::Gz => "gz",
@@ -54,6 +49,12 @@ impl Compression {
             Compression::Xz => &["-cJf"],
             Compression::Zst => &["--zstd", "-cf"],
         }
+    }
+}
+
+impl std::fmt::Display for Compression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.ext())
     }
 }
 
@@ -76,8 +77,12 @@ pub fn build(
     let app = read_app_name(project)?;
     let multi = targets.len() > 1;
     println!(
-        "\x1b[1m🥪 panini\x1b[0m  pressing '{app}' → {} target{}\n",
-        targets.len(),
+        "{} {}  {} {} → {} target{}\n",
+        crate::style::gradient("🥪 panini"),
+        crate::style::muted(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+        crate::style::muted("pressing"),
+        crate::style::cyan(&format!("'{app}'")),
+        crate::style::teal(&targets.len().to_string()),
         if multi { "s" } else { "" }
     );
 
@@ -100,7 +105,12 @@ pub fn build(
             (Some(v), None) => format!("bundling OTP {v}, compiled with host OTP"),
             (None, _) => "host OTP".into(),
         };
-        println!("\n\x1b[1m▸ {}\x1b[0m  {compiled_with}", target.name);
+        println!(
+            "\n{} {}  {}",
+            crate::style::teal("▸"),
+            crate::style::header(target.name),
+            crate::style::muted(&compiled_with)
+        );
 
         // The Linux OTP toolchain is musl-linked with a /tmp interpreter path;
         // install it before compiling with those binaries.
@@ -147,10 +157,11 @@ pub fn build(
         let otp_tag = format!("{:08x}", djb2(rt_key.as_bytes()));
         let app_tag = format!("{app}-{:08x}", djb2(&app_bytes));
         println!(
-            "     payload: otp {} MB + app {} KB  [{}, otp {otp_tag}]",
-            otp_bytes.len() / 1_048_576,
-            app_bytes.len() / 1024,
-            ext,
+            "     {} otp {} + app {}  {}",
+            crate::style::muted("payload:"),
+            crate::style::cyan(&format!("{} MB", otp_bytes.len() / 1_048_576)),
+            crate::style::cyan(&format!("{} KB", app_bytes.len() / 1024)),
+            crate::style::muted(&format!("[{ext}, otp {otp_tag}]")),
         );
 
         build_launcher(
@@ -165,10 +176,14 @@ pub fn build(
             target,
             &output,
         )?;
-        println!("     \x1b[32m✓\x1b[0m {}", output.display());
+        println!(
+            "     {} {}",
+            crate::style::ok("✓"),
+            crate::style::teal(&output.display().to_string())
+        );
     }
 
-    println!("\n\x1b[32m✓ done\x1b[0m");
+    println!("\n{}", crate::style::gradient("✓ done"));
     Ok(())
 }
 
@@ -285,7 +300,10 @@ fn compile_shipment(project: &Path, toolbin: Option<&Path>) -> Result<(), String
     if toolbin.is_some() {
         let _ = fs::remove_dir_all(project.join("build/dev/erlang"));
     }
-    println!("     gleam export erlang-shipment");
+    println!(
+        "     {}",
+        crate::style::muted("gleam export erlang-shipment")
+    );
     sh_env(
         "gleam",
         &["export", "erlang-shipment"],
@@ -329,10 +347,14 @@ fn assemble_runtime(
             .map_err(|e| format!("bundle musl runtime: {e}"))?;
     }
     println!(
-        "     runtime: {} + {} OTP lib apps{}",
-        erts_name,
-        lib_apps.len(),
-        if musl.is_some() { " + musl" } else { "" }
+        "     {} {} {}",
+        crate::style::muted("runtime:"),
+        crate::style::cyan(&erts_name),
+        crate::style::muted(&format!(
+            "+ {} OTP lib apps{}",
+            lib_apps.len(),
+            if musl.is_some() { " + musl" } else { "" }
+        )),
     );
     let musl_part = musl.map(|m| m.hash.as_str()).unwrap_or("");
     Ok(format!("{erts_name}|{}|{musl_part}", app_names.join(",")))

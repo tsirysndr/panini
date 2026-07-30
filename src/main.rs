@@ -7,82 +7,101 @@
 //!   4. compress the runtime + app into two content-addressed packs and embed
 //!      them in a Zig self-extracting launcher (runtime is shared across apps)
 //!
-//! std-only: shells out to `gleam`, `erl`, `tar`, `cp`, and `zig`.
+//! Shells out to `gleam`, `erl`, `tar`, `cp`, and `zig`; `clap` drives the CLI.
 
-use std::env;
+use clap::{Args, Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 mod otp;
 mod pipeline;
+mod style;
 mod target;
 mod zig;
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let cmd = args.get(1).map(String::as_str).unwrap_or("help");
+/// panini — press a Gleam (Erlang/BEAM) app into a single self-contained binary. 🥪
+#[derive(Parser)]
+#[command(
+    name = "panini",
+    version,
+    about = "🥪 panini — bundle a Gleam app and the Erlang/BEAM runtime into one self-contained binary that runs with nothing installed",
+    styles = style::clap_styles(),
+    arg_required_else_help = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    let result = match cmd {
-        "build" => cmd_build(&args[2..]),
-        "info" => otp::print_info(),
-        "doctor" => cmd_doctor(),
-        "otp-versions" => otp::list_versions(),
-        "targets" => {
+#[derive(Subcommand)]
+enum Commands {
+    /// Press a Gleam app into one self-contained binary
+    Build(BuildArgs),
+    /// Check the toolchain is ready
+    Doctor,
+    /// List supported build targets
+    Targets,
+    /// List OTP versions usable with --otp
+    OtpVersions,
+    /// Show the detected Gleam/OTP toolchain
+    Info,
+}
+
+/// Options for `panini build`.
+#[derive(Args)]
+#[command(after_help = "\
+EXAMPLES:
+  panini build ./examples/hello -o ./hello
+  panini build ./examples/hello --otp 27.2
+  panini build ./examples/hello --target x86_64-linux,aarch64-linux --otp 27.2
+  panini build ./examples/hello --target all --otp 27.2 --compression xz")]
+struct BuildArgs {
+    /// Gleam project directory
+    #[arg(value_name = "PROJECT_DIR", default_value = ".")]
+    project: PathBuf,
+
+    /// Output binary (default: <project>/<app>)
+    #[arg(short, long, value_name = "PATH")]
+    output: Option<PathBuf>,
+
+    /// Bundle a precompiled OTP version, e.g. 27.2 (downloaded)
+    #[arg(long, value_name = "VERSION")]
+    otp: Option<String>,
+
+    /// Comma-separated targets, or 'all' (default: host)
+    #[arg(long, value_name = "LIST")]
+    target: Option<String>,
+
+    /// Payload compressor. xz/zst make smaller binaries but need that
+    /// decompressor present on Linux targets at run time
+    #[arg(long, value_name = "KIND", default_value_t = pipeline::Compression::Gz)]
+    compression: pipeline::Compression,
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    let result = match cli.command {
+        Commands::Build(args) => cmd_build(args),
+        Commands::Info => otp::print_info(),
+        Commands::Doctor => cmd_doctor(),
+        Commands::OtpVersions => otp::list_versions(),
+        Commands::Targets => {
             cmd_targets();
             Ok(())
-        }
-        "help" | "-h" | "--help" => {
-            print_help();
-            Ok(())
-        }
-        "version" | "--version" | "-V" => {
-            // Compiled in from Cargo.toml at build time.
-            println!("panini {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
-        }
-        other => {
-            eprintln!("panini: unknown command '{other}'\n");
-            print_help();
-            std::process::exit(2);
         }
     };
 
     if let Err(e) = result {
-        eprintln!("\x1b[31merror:\x1b[0m {e}");
+        eprintln!("{} {e}", style::error("error:"));
         std::process::exit(1);
     }
 }
 
-fn print_help() {
-    println!(
-        "panini — a Burrito for Gleam 🥪\n\n\
-         USAGE:\n  \
-           panini build [PROJECT_DIR] [OPTIONS]     Press a Gleam app into one binary\n  \
-           panini doctor                            Check the toolchain is ready\n  \
-           panini targets                           List supported build targets\n  \
-           panini otp-versions                      List OTP versions usable with --otp\n  \
-           panini info                              Show detected Gleam/OTP toolchain\n  \
-           panini version                           Show the panini version\n  \
-           panini help                              Show this help\n\n\
-         BUILD OPTIONS:\n  \
-           -o, --output PATH     Output binary (default: <project>/<app>)\n  \
-           --otp VERSION         Bundle a precompiled OTP version, e.g. 27.2 (downloaded)\n  \
-           --target LIST         Comma-separated targets, or 'all' (default: host)\n  \
-           --compression KIND    Payload compressor: gz (default), xz, or zst.\n                         \
-                                 xz/zst yield smaller binaries but need that\n                         \
-                                 decompressor present on Linux targets at run time.\n\n\
-         EXAMPLES:\n  \
-           panini build ./examples/hello -o ./hello\n  \
-           panini build ./examples/hello --otp 27.2\n  \
-           panini build ./examples/hello --target x86_64-linux,aarch64-linux --otp 27.2\n  \
-           panini build ./examples/hello --target all --otp 27.2"
-    );
-}
-
 /// Diagnose whether the toolchain needed to build is present.
 fn cmd_doctor() -> Result<(), String> {
-    println!("panini doctor\n");
+    println!("{}\n", style::header("panini doctor"));
     let mut ok = true;
 
     // Fatal: without these, panini can't build at all.
@@ -108,25 +127,31 @@ fn cmd_doctor() -> Result<(), String> {
             "io:format(\"OTP ~s\",[erlang:system_info(otp_release)]),halt().",
         ],
     ) {
-        Ok(v) => println!("  \x1b[32m✓\x1b[0m erl: {}", v.trim()),
-        Err(_) => {
-            println!("  \x1b[33m•\x1b[0m erl: none (host-OTP builds unavailable; use --otp <v>)")
-        }
+        Ok(v) => println!("  {} erl: {}", style::ok("✓"), style::cyan(v.trim())),
+        Err(_) => println!(
+            "  {} erl: {}",
+            style::warn("•"),
+            style::muted("none (host-OTP builds unavailable; use --otp <v>)")
+        ),
     }
 
     // Zig is not fatal — panini auto-downloads 0.16.0 if missing (needs curl+tar).
-    println!("  \x1b[36m•\x1b[0m zig: {}", zig::describe());
+    println!("  {} zig: {}", style::cyan("•"), zig::describe());
 
     match target::host() {
-        Some(t) => println!("  {:<6} {}", "host:", t.name),
+        Some(t) => println!("  {} {}", style::muted("host:"), style::cyan(t.name)),
         None => {
-            println!("  {:<6} UNSUPPORTED (see `panini targets`)", "host:");
+            println!(
+                "  {} {}",
+                style::muted("host:"),
+                style::warn("UNSUPPORTED (see `panini targets`)")
+            );
             ok = false;
         }
     }
 
     if ok {
-        println!("\n\x1b[32m✓ ready to build\x1b[0m");
+        println!("\n{}", style::ok("✓ ready to build"));
         Ok(())
     } else {
         Err("some required tools are missing (see above)".into())
@@ -138,87 +163,57 @@ fn check(program: &str, args: &[&str], hint: &str) -> bool {
     match capture(program, args) {
         Ok(out) => {
             let ver = out.lines().next().unwrap_or("").trim();
-            println!("  \x1b[32m✓\x1b[0m {program}: {ver}");
+            println!("  {} {program}: {}", style::ok("✓"), style::cyan(ver));
             true
         }
         Err(_) => {
-            println!("  \x1b[31m✗\x1b[0m {program}: not found — {hint}");
+            println!(
+                "  {} {program}: {}",
+                style::error("✗"),
+                style::muted(&format!("not found — {hint}"))
+            );
             false
         }
     }
 }
 
 fn cmd_targets() {
-    println!("supported targets:");
+    println!("{}", style::header("supported targets"));
     let host = target::host();
     for t in target::ALL {
-        let tag = if host.map(|h| h.name == t.name).unwrap_or(false) {
-            "  (host)"
+        let is_host = host.map(|h| h.name == t.name).unwrap_or(false);
+        let tag = if is_host {
+            style::teal("  (host)")
         } else {
-            ""
+            String::new()
         };
-        println!("  {:<16} zig: {}{}", t.name, t.zig, tag);
+        // Pad before coloring so ANSI codes don't throw off the column width.
+        let name = format!("{:<16}", t.name);
+        println!(
+            "  {} {} {}{}",
+            style::cyan(&name),
+            style::muted("zig:"),
+            t.zig,
+            tag
+        );
     }
-    println!("\nUse with: panini build --target <name>[,<name>...]  (or --target all)");
-    println!("Cross targets require --otp <version>.");
+    println!(
+        "\n{} panini build --target <name>[,<name>...]  (or --target all)",
+        style::muted("use with:")
+    );
+    println!("{}", style::muted("cross targets require --otp <version>."));
 }
 
-/// Parse `build` args: project dir, `-o OUTPUT`, `--otp VERSION`, `--target LIST`.
-fn cmd_build(args: &[String]) -> Result<(), String> {
-    let mut project = PathBuf::from(".");
-    let mut out: Option<PathBuf> = None;
-    let mut otp_version: Option<String> = None;
-    let mut target_spec: Option<String> = None;
-    let mut compression = pipeline::Compression::Gz;
-    let mut i = 0;
-    let mut project_set = false;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-o" | "--output" => {
-                i += 1;
-                out = Some(PathBuf::from(
-                    args.get(i).ok_or("-o requires a path argument")?,
-                ));
-            }
-            "--otp" => {
-                i += 1;
-                otp_version = Some(
-                    args.get(i)
-                        .ok_or("--otp requires a version, e.g. 27.2")?
-                        .clone(),
-                );
-            }
-            "--target" => {
-                i += 1;
-                target_spec = Some(
-                    args.get(i)
-                        .ok_or("--target requires a value, e.g. all")?
-                        .clone(),
-                );
-            }
-            "--compression" | "--compress" => {
-                i += 1;
-                compression = pipeline::Compression::parse(
-                    args.get(i)
-                        .ok_or("--compression requires a value: gz, xz, or zst")?,
-                )?;
-            }
-            p if !p.starts_with('-') && !project_set => {
-                project = PathBuf::from(p);
-                project_set = true;
-            }
-            other => return Err(format!("unexpected argument: {other}")),
-        }
-        i += 1;
-    }
+/// Run a `panini build` from its parsed arguments.
+fn cmd_build(args: BuildArgs) -> Result<(), String> {
+    let targets = resolve_targets(args.target.as_deref())?;
 
-    let targets = resolve_targets(target_spec.as_deref())?;
-
-    let project = project
+    let project = args
+        .project
         .canonicalize()
-        .map_err(|e| format!("project dir {}: {e}", project.display()))?;
+        .map_err(|e| format!("project dir {}: {e}", args.project.display()))?;
 
-    pipeline::build(&project, out, otp_version, targets, compression)
+    pipeline::build(&project, args.output, args.otp, targets, args.compression)
 }
 
 /// Turn a `--target` spec into a target list. `None` => host; "all" => everything.

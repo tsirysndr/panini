@@ -58,8 +58,11 @@ pub fn precompiled_root(version: &str, target: &Target, cache: &Path) -> Result<
     if !tgz.exists() {
         let url = target.otp_url(version);
         println!(
-            "     downloading OTP {version} for {} (cached after first use)…",
-            target.name
+            "     {}",
+            crate::style::muted(&format!(
+                "downloading OTP {version} for {} (cached after first use)…",
+                target.name
+            ))
         );
         let part = tgz.with_extension("part");
         crate::sh(
@@ -144,7 +147,10 @@ pub fn fetch_musl(root: &Path, cache: &Path) -> Result<Musl, String> {
             "https://beam-machine-universal.b-cdn.net/musl/libc-musl-{hash}.so\
              ?please-respect-my-bandwidth-costs=thank-you"
         );
-        println!("     fetching musl runtime for Linux (cached after first use)…");
+        println!(
+            "     {}",
+            crate::style::muted("fetching musl runtime for Linux (cached after first use)…")
+        );
         let part = so.with_extension("part");
         crate::sh(
             "curl",
@@ -295,14 +301,17 @@ pub fn list_versions() -> Result<(), String> {
     versions.sort_by(|a, b| cmp_version(b, a)); // descending
     versions.dedup();
 
-    println!("OTP versions available via --otp (newest first):\n");
+    println!(
+        "{}\n",
+        crate::style::header("OTP versions available via --otp (newest first)")
+    );
     let mut shown = 0;
     for v in &versions {
         // BEAM Machine precompiled builds start at 25.3.
         if cmp_version(v, "25.3") == std::cmp::Ordering::Less {
             continue;
         }
-        print!("  {v:<10}");
+        print!("  {}", crate::style::teal(&format!("{v:<10}")));
         shown += 1;
         if shown % 5 == 0 {
             println!();
@@ -311,8 +320,14 @@ pub fn list_versions() -> Result<(), String> {
     if shown % 5 != 0 {
         println!();
     }
-    println!("\n  precompiled runtimes: https://github.com/erlef/otp_builds  (macOS builds are universal)");
-    println!("  usage: panini build --otp <version> [--target <t>]");
+    println!(
+        "\n  {}",
+        crate::style::muted("precompiled runtimes: https://github.com/erlef/otp_builds  (macOS builds are universal)")
+    );
+    println!(
+        "  {}",
+        crate::style::muted("usage: panini build --otp <version> [--target <t>]")
+    );
     Ok(())
 }
 
@@ -360,11 +375,18 @@ fn cmp_version(a: &str, b: &str) -> std::cmp::Ordering {
 pub fn print_info() -> Result<(), String> {
     let gleam = capture("gleam", &["--version"]).unwrap_or_else(|_| "not found".into());
     let root = root_dir()?;
-    println!("panini toolchain");
-    println!("  gleam:        {gleam}");
-    println!("  otp release:  {}", otp_release()?);
-    println!("  erts version: {}", erts_version()?);
-    println!("  otp root:     {}", root.display());
-    println!("  zig:          {}", crate::zig::describe());
+    let row = |label: &str, value: &str| {
+        println!(
+            "  {} {}",
+            crate::style::muted(label),
+            crate::style::cyan(value)
+        );
+    };
+    println!("{}", crate::style::header("panini toolchain"));
+    row("gleam:       ", &gleam);
+    row("otp release: ", &otp_release()?);
+    row("erts version:", &erts_version()?);
+    row("otp root:    ", &root.display().to_string());
+    row("zig:         ", &crate::zig::describe());
     Ok(())
 }
