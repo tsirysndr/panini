@@ -115,7 +115,7 @@ fn cmd_doctor() -> Result<(), String> {
         &["--version"],
         "needed to fetch OTP runtimes and Zig",
     );
-    ok &= check("tar", &["--version"], "needed to pack/unpack payloads");
+    ok &= check_tar();
 
     // Non-fatal: a host `erl` is only needed for host-OTP builds (no --otp);
     // a `--otp <v>` build downloads and compiles with its own OTP toolchain.
@@ -156,6 +156,48 @@ fn cmd_doctor() -> Result<(), String> {
     } else {
         Err("some required tools are missing (see above)".into())
     }
+}
+
+/// `tar` check that tolerates BSD base tars. `tar --version` isn't portable —
+/// OpenBSD/NetBSD base tar reject long options — so prefer a version string but
+/// fall back to a plain presence test rather than misreporting tar as missing.
+fn check_tar() -> bool {
+    let version = Command::new("tar")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .filter(|s| !s.is_empty());
+    if let Some(v) = version {
+        println!("  {} tar: {}", style::ok("✓"), style::cyan(&v));
+        return true;
+    }
+    // No usable --version; confirm tar is on PATH without invoking its parser.
+    let present = Command::new("sh")
+        .args(["-c", "command -v tar"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if present {
+        println!("  {} tar: {}", style::ok("✓"), style::cyan("present"));
+    } else {
+        println!(
+            "  {} tar: {}",
+            style::error("✗"),
+            style::muted("not found — needed to pack/unpack payloads")
+        );
+    }
+    present
 }
 
 /// Print a ✓/✗ line for a tool; return whether it ran successfully.
