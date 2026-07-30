@@ -4,7 +4,8 @@
 //!   1. `gleam export erlang-shipment`   -> compiled .beam + .app files (no runtime)
 //!   2. assemble a minimal, relocatable OTP runtime (erts + boot + needed lib apps)
 //!   3. generate run.sh that sets ERL_ROOTDIR and boots the app
-//!   4. tar.gz the payload and embed it in a Zig self-extracting launcher
+//!   4. compress the runtime + app into two content-addressed packs and embed
+//!      them in a Zig self-extracting launcher (runtime is shared across apps)
 //!
 //! std-only: shells out to `gleam`, `erl`, `tar`, `cp`, and `zig`.
 
@@ -67,7 +68,10 @@ fn print_help() {
          BUILD OPTIONS:\n  \
            -o, --output PATH     Output binary (default: <project>/<app>)\n  \
            --otp VERSION         Bundle a precompiled OTP version, e.g. 27.2 (downloaded)\n  \
-           --target LIST         Comma-separated targets, or 'all' (default: host)\n\n\
+           --target LIST         Comma-separated targets, or 'all' (default: host)\n  \
+           --compression KIND    Payload compressor: gz (default), xz, or zst.\n                         \
+                                 xz/zst yield smaller binaries but need that\n                         \
+                                 decompressor present on Linux targets at run time.\n\n\
          EXAMPLES:\n  \
            panini build ./examples/hello -o ./hello\n  \
            panini build ./examples/hello --otp 27.2\n  \
@@ -165,6 +169,7 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     let mut out: Option<PathBuf> = None;
     let mut otp_version: Option<String> = None;
     let mut target_spec: Option<String> = None;
+    let mut compression = pipeline::Compression::Gz;
     let mut i = 0;
     let mut project_set = false;
     while i < args.len() {
@@ -191,6 +196,13 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
                         .clone(),
                 );
             }
+            "--compression" | "--compress" => {
+                i += 1;
+                compression = pipeline::Compression::parse(
+                    args.get(i)
+                        .ok_or("--compression requires a value: gz, xz, or zst")?,
+                )?;
+            }
             p if !p.starts_with('-') && !project_set => {
                 project = PathBuf::from(p);
                 project_set = true;
@@ -206,7 +218,7 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("project dir {}: {e}", project.display()))?;
 
-    pipeline::build(&project, out, otp_version, targets)
+    pipeline::build(&project, out, otp_version, targets, compression)
 }
 
 /// Turn a `--target` spec into a target list. `None` => host; "all" => everything.
