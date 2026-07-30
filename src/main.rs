@@ -35,6 +35,11 @@ fn main() {
             print_help();
             Ok(())
         }
+        "version" | "--version" | "-V" => {
+            // Compiled in from Cargo.toml at build time.
+            println!("panini {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         other => {
             eprintln!("panini: unknown command '{other}'\n");
             print_help();
@@ -57,6 +62,7 @@ fn print_help() {
            panini targets                           List supported build targets\n  \
            panini otp-versions                      List OTP versions usable with --otp\n  \
            panini info                              Show detected Gleam/OTP toolchain\n  \
+           panini version                           Show the panini version\n  \
            panini help                              Show this help\n\n\
          BUILD OPTIONS:\n  \
            -o, --output PATH     Output binary (default: <project>/<app>)\n  \
