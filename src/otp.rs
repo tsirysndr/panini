@@ -2,6 +2,7 @@
 //! shipment actually needs, so we bundle a minimal (not full) runtime.
 
 use crate::capture;
+use crate::target::Target;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,94 @@ pub fn root_dir() -> Result<PathBuf, String> {
         ],
     )?;
     Ok(PathBuf::from(out))
+}
+
+/// Find the single `erts-<vsn>` directory inside an OTP root.
+pub fn find_erts_dir(root: &Path) -> Result<PathBuf, String> {
+    fs::read_dir(root)
+        .map_err(|e| format!("read {}: {e}", root.display()))?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("erts-"))
+                    .unwrap_or(false)
+        })
+        .ok_or_else(|| format!("no erts-* dir in {}", root.display()))
+}
+
+/// Find the `releases/<name>/` directory inside an OTP root (holds start.boot).
+pub fn find_release_dir(root: &Path) -> Result<PathBuf, String> {
+    let releases = root.join("releases");
+    fs::read_dir(&releases)
+        .map_err(|e| format!("read {}: {e}", releases.display()))?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_dir() && p.join("start.boot").exists())
+        .ok_or_else(|| format!("no releases/*/start.boot under {}", root.display()))
+}
+
+/// A ready-to-bundle OTP root for a precompiled version + target, downloading and
+/// extracting into the cache on first use. Subsequent builds reuse the cache.
+pub fn precompiled_root(version: &str, target: &Target, cache: &Path) -> Result<PathBuf, String> {
+    let archives = cache.join("otp");
+    fs::create_dir_all(&archives).map_err(|e| format!("mkdir {}: {e}", archives.display()))?;
+
+    let name = target.otp_archive_name(version);
+    let tgz = archives.join(&name);
+    if !tgz.exists() {
+        let url = target.otp_url(version);
+        println!(
+            "     downloading OTP {version} for {} (cached after first use)…",
+            target.name
+        );
+        let part = tgz.with_extension("part");
+        crate::sh(
+            "curl",
+            &["-fsSL", "--retry", "2", "-o", &part.to_string_lossy(), &url],
+            None,
+        )
+        .map_err(|e| {
+            format!("download failed: {e}\n  (is there a precompiled OTP {version} for {}? see https://github.com/erlef/otp_builds)", target.name)
+        })?;
+        fs::rename(&part, &tgz).map_err(|e| format!("finalize download: {e}"))?;
+    }
+
+    let stem = name.trim_end_matches(".tar.gz");
+    let extract_dir = archives.join(stem);
+    if !extract_dir.exists() {
+        fs::create_dir_all(&extract_dir).ok();
+        crate::sh(
+            "tar",
+            &[
+                "-xzf",
+                &tgz.to_string_lossy(),
+                "-C",
+                &extract_dir.to_string_lossy(),
+            ],
+            None,
+        )?;
+    }
+
+    // Archives nest everything under a single top dir (e.g. otp_universal_apple_darwin_27.2).
+    if find_erts_dir(&extract_dir).is_ok() {
+        return Ok(extract_dir);
+    }
+    for e in fs::read_dir(&extract_dir)
+        .map_err(|e| format!("read extract dir: {e}"))?
+        .flatten()
+    {
+        let p = e.path();
+        if p.is_dir() && find_erts_dir(&p).is_ok() {
+            return Ok(p);
+        }
+    }
+    Err(format!(
+        "could not locate an OTP root inside {}",
+        extract_dir.display()
+    ))
 }
 
 /// ERTS version string (e.g. "17.0.3"); the runtime dir is `erts-<version>`.
@@ -74,7 +163,9 @@ fn find_app_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&d) else { continue };
+        let Ok(entries) = fs::read_dir(&d) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -125,6 +216,92 @@ fn newest_versioned_dir(lib: &Path, name: &str) -> Option<PathBuf> {
     matches.pop()
 }
 
+/// List OTP versions that can be `--otp`'d, from the erlang/otp release tags.
+/// Precompiled BEAM Machine builds exist for OTP 25.3+; older tags are hidden.
+pub fn list_versions() -> Result<(), String> {
+    let mut args = vec![
+        "-fsSL",
+        "https://api.github.com/repos/erlang/otp/tags?per_page=100",
+        "-H",
+        "Accept: application/vnd.github+json",
+    ];
+    // Use CI/user token if present to avoid unauthenticated rate limits.
+    let auth;
+    if let Ok(tok) = std::env::var("GITHUB_TOKEN") {
+        if !tok.is_empty() {
+            auth = format!("Authorization: Bearer {tok}");
+            args.push("-H");
+            args.push(&auth);
+        }
+    }
+    let body = capture("curl", &args)?;
+
+    let mut versions = extract_otp_versions(&body);
+    versions.sort_by(|a, b| cmp_version(b, a)); // descending
+    versions.dedup();
+
+    println!("OTP versions available via --otp (newest first):\n");
+    let mut shown = 0;
+    for v in &versions {
+        // BEAM Machine precompiled builds start at 25.3.
+        if cmp_version(v, "25.3") == std::cmp::Ordering::Less {
+            continue;
+        }
+        print!("  {v:<10}");
+        shown += 1;
+        if shown % 5 == 0 {
+            println!();
+        }
+    }
+    if shown % 5 != 0 {
+        println!();
+    }
+    println!("\n  precompiled runtimes: https://github.com/erlef/otp_builds  (macOS builds are universal)");
+    println!("  usage: panini build --otp <version> [--target <t>]");
+    Ok(())
+}
+
+/// Scan a blob for `OTP-<major>[.<minor>...]` tag names.
+fn extract_otp_versions(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let needle = b"OTP-";
+    let mut i = 0;
+    while i + needle.len() < bytes.len() {
+        if &bytes[i..i + needle.len()] == needle {
+            let start = i + needle.len();
+            let mut j = start;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b'.') {
+                j += 1;
+            }
+            // Require a leading digit and at least one dot (skip old "OTP-R16B..").
+            if j > start && bytes[start].is_ascii_digit() {
+                let v = &text[start..j];
+                if v.contains('.') && !v.ends_with('.') {
+                    out.push(v.to_string());
+                }
+            }
+            i = j.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Compare dotted version strings numerically.
+fn cmp_version(a: &str, b: &str) -> std::cmp::Ordering {
+    let pa = a.split('.').map(|n| n.parse::<u32>().unwrap_or(0));
+    let pb = b.split('.').map(|n| n.parse::<u32>().unwrap_or(0));
+    pa.into_iter()
+        .chain(std::iter::repeat(0))
+        .zip(pb.into_iter().chain(std::iter::repeat(0)))
+        .take(4)
+        .map(|(x, y)| x.cmp(&y))
+        .find(|o| *o != std::cmp::Ordering::Equal)
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
 pub fn print_info() -> Result<(), String> {
     let gleam = capture("gleam", &["--version"]).unwrap_or_else(|_| "not found".into());
     let root = root_dir()?;
@@ -133,5 +310,6 @@ pub fn print_info() -> Result<(), String> {
     println!("  otp release:  {}", otp_release()?);
     println!("  erts version: {}", erts_version()?);
     println!("  otp root:     {}", root.display());
+    println!("  zig:          {}", crate::zig::describe());
     Ok(())
 }

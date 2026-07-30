@@ -1,0 +1,160 @@
+name: e2e
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Gleam used to build the sample app. Bump alongside the toolchain.
+  GLEAM_VERSION: "1.17.0"
+
+jobs:
+  # ── Headline e2e ────────────────────────────────────────────────────────────
+  # Press the sample app into a single binary across platforms AND OTP versions,
+  # using a *bundled* OTP (downloaded + compiled-with by panini). No system
+  # Erlang is installed — panini provides the whole toolchain. Zig 0.16 is
+  # auto-downloaded by panini. The produced binary is then run natively.
+  bundle:
+    name: bundle · ${{ matrix.os }} · otp-${{ matrix.otp }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel]
+        otp: ["26.2.5", "27.2", "28.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Gleam ${{ env.GLEAM_VERSION }}
+        shell: bash
+        run: |
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)   T=x86_64-unknown-linux-musl ;;
+            Linux-ARM64) T=aarch64-unknown-linux-musl ;;
+            macOS-ARM64) T=aarch64-apple-darwin ;;
+            macOS-X64)   T=x86_64-apple-darwin ;;
+            *) echo "unsupported runner ${{ runner.os }}-${{ runner.arch }}"; exit 1 ;;
+          esac
+          mkdir -p "$HOME/bin"
+          curl -fsSL "https://github.com/gleam-lang/gleam/releases/download/v${GLEAM_VERSION}/gleam-v${GLEAM_VERSION}-${T}.tar.gz" \
+            | tar -xz -C "$HOME/bin" gleam
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      # Cache the OTP + Zig archives panini downloads (also respects the CDN's
+      # bandwidth by not re-fetching on every run).
+      - name: Cache panini downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/panini
+          key: panini-${{ runner.os }}-${{ runner.arch }}-otp${{ matrix.otp }}-zig
+
+      - run: cargo build --release
+      - run: ./target/release/panini doctor
+      - run: gleam --version
+
+      - name: Build single binary (bundled OTP ${{ matrix.otp }})
+        run: ./target/release/panini build examples/hello -o ./hello --otp ${{ matrix.otp }}
+
+      - name: Run it and assert output
+        run: |
+          set -euo pipefail
+          out="$(./hello)"
+          echo "output: $out"
+          echo "$out" | grep -qx "Hello from hello!"
+
+  # ── Host-OTP path ───────────────────────────────────────────────────────────
+  # Exercise the default (no --otp) path where panini bundles the runtime of the
+  # Erlang already installed on the machine (via erlef/setup-beam).
+  native:
+    name: native · ubuntu · setup-beam otp-${{ matrix.otp }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        otp: ["26", "27", "28"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: "3"
+
+      - name: Cache panini downloads (Zig)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/panini
+          key: panini-native-${{ runner.arch }}-zig
+
+      - run: cargo build --release
+      - run: ./target/release/panini doctor
+      - name: Build single binary (host OTP)
+        run: ./target/release/panini build examples/hello -o ./hello
+      - name: Run it and assert output
+        run: |
+          set -euo pipefail
+          out="$(./hello)"
+          echo "output: $out"
+          echo "$out" | grep -qx "Hello from hello!"
+
+  # ── Cross-compilation e2e ───────────────────────────────────────────────────
+  # Build an aarch64-linux binary on an x86_64-linux runner (the app is compiled
+  # by the host toolchain, so the bundled OTP major must match the host's), then
+  # run it on a real arm64 runner. Proves cross-compiled binaries actually work.
+  cross-build:
+    name: cross-build · x86_64-linux → aarch64-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.2"
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: "3"
+      - name: Cache panini downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/panini
+          key: panini-cross-aarch64-linux-otp27
+      - run: cargo build --release
+      - name: Cross-build for aarch64-linux (bundle OTP 27.2, matches host major)
+        run: ./target/release/panini build examples/hello --target aarch64-linux --otp 27.2 -o ./hello-aarch64-linux
+      - run: file ./hello-aarch64-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hello-aarch64-linux
+          path: ./hello-aarch64-linux
+
+  cross-run:
+    name: cross-run · aarch64-linux
+    needs: cross-build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hello-aarch64-linux
+      - name: Run the cross-built binary and assert output
+        run: |
+          set -euo pipefail
+          chmod +x ./hello-aarch64-linux
+          out="$(./hello-aarch64-linux)"
+          echo "output: $out"
+          echo "$out" | grep -qx "Hello from hello!"
+
+  # ── The panini CLI itself ───────────────────────────────────────────────────
+  cli:
+    name: cli · build & unit checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo build --release
+      - run: cargo clippy --release -- -D warnings
+      - run: cargo fmt --check
+      - run: ./target/release/panini targets
